@@ -1,0 +1,172 @@
+alias: Smart Home Safety Engine
+id: smart_home_safety_engine
+mode: restart
+description: >
+  Entrance lighting + door-left-open reminders + away/asleep entry alerts.
+
+trigger:
+  # door opened
+  - platform: state
+    entity_id: binary_sensor.DOOR_SENSOR   # change to your door sensor
+    from: "off"
+    to: "on"
+    id: door_open
+
+  # door open for a while
+  - platform: state
+    entity_id: binary_sensor.DOOR_SENSOR
+    to: "on"
+    for: "00:05:00"   # adjust if needed
+    id: door_open_still
+
+  # door closed
+  - platform: state
+    entity_id: binary_sensor.DOOR_SENSOR
+    from: "on"
+    to: "off"
+    id: door_closed
+
+condition: []
+
+variables:
+  lux_threshold: 50   # change depending on your lux sensor scale
+
+action:
+  - choose:
+
+      # arrival lighting (home + dark + door opens)
+      - conditions:
+          - condition: trigger
+            id: door_open
+          - condition: state
+            entity_id: input_select.HOUSE_MODE   # your home/away/asleep selector
+            state: "Home"
+          - condition: numeric_state
+            entity_id: sensor.LIGHT_LEVEL        # your lux sensor
+            below: "{{ lux_threshold }}"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id: light.ENTRANCE_LIGHT   # entrance light
+            data:
+              brightness_pct: 60
+
+          # optional second light
+          - service: light.turn_on
+            target:
+              entity_id: light.SECONDARY_LIGHT
+            data:
+              brightness_pct: 40
+
+          # camera is optional, comment out if not needed
+          - service: camera.record
+            target:
+              entity_id: camera.ENTRY_CAMERA
+            data:
+              filename: "/media/arrival_{{ now().strftime('%Y%m%d_%H%M%S') }}.mp4"
+              duration: 30
+              lookback: 5
+
+          # wait for no motion or timeout
+          - wait_for_trigger:
+              - platform: state
+                entity_id: binary_sensor.MOTION_SENSOR   # motion sensor here
+                to: "off"
+                for: "00:02:00"
+            timeout: "00:15:00"
+            continue_on_timeout: true
+
+          # only turn off if door actually closed
+          - condition: state
+            entity_id: binary_sensor.DOOR_SENSOR
+            state: "off"
+
+          - service: light.turn_off
+            target:
+              entity_id:
+                - light.ENTRANCE_LIGHT
+                - light.SECONDARY_LIGHT
+
+      # door opens while away/asleep
+      - conditions:
+          - condition: trigger
+            id: door_open
+          - condition: or
+            conditions:
+              - condition: state
+                entity_id: input_select.HOUSE_MODE
+                state: "Away"
+              - condition: state
+                entity_id: input_select.HOUSE_MODE
+                state: "Asleep"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id:
+                - light.ENTRANCE_LIGHT
+                - light.SECONDARY_LIGHT
+            data:
+              brightness_pct: 80
+
+          - service: camera.record
+            target:
+              entity_id: camera.ENTRY_CAMERA
+            data:
+              filename: "/media/unexpected_{{ now().strftime('%Y%m%d_%H%M%S') }}.mp4"
+              duration: 60
+              lookback: 10
+
+          - service: notify.USER_PHONE    # replace with notify.mobile_app_xxx
+            data:
+              title: "Unexpected Entry"
+              message: "Door opened while mode was {{ states('input_select.HOUSE_MODE') }}."
+
+      # door left open reminder
+      - conditions:
+          - condition: trigger
+            id: door_open_still
+        sequence:
+          - service: notify.USER_PHONE
+            data:
+              title: "Door Left Open"
+              message: "Door has been open 5 minutes."
+
+          # blink entrance light (optional)
+          - repeat:
+              count: 3
+              sequence:
+                - service: light.turn_on
+                  target:
+                    entity_id: light.ENTRANCE_LIGHT
+                  data:
+                    brightness_pct: 100
+                - delay: "00:00:01"
+                - service: light.turn_off
+                  target:
+                    entity_id: light.ENTRANCE_LIGHT
+                - delay: "00:00:01"
+
+          # wait another few mins, then check again
+          - delay: "00:05:00"
+
+          - condition: state
+            entity_id: binary_sensor.DOOR_SENSOR
+            state: "on"
+
+          - service: notify.USER_PHONE
+            data:
+              title: "Door Still Open"
+              message: "Door still open after 10 minutes."
+
+  # optional cleanup when door closes and no motion
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: door_closed
+        sequence:
+          - condition: state
+            entity_id: binary_sensor.MOTION_SENSOR
+            state: "off"
+          - service: light.turn_off
+            target:
+              entity_id: light.ENTRANCE_LIGHT
